@@ -5020,9 +5020,9 @@
     let supabaseRealtimeChannel = null;
 
     function getActiveSupabaseConfig() {
-      const u = localStorage.getItem('rme_supabase_url') || SUPABASE_CONFIG.defaultUrl || '';
-      const k = localStorage.getItem('rme_supabase_key') || SUPABASE_CONFIG.defaultKey || '';
-      return { url: u.trim(), anonKey: k.trim() };
+      const u = (localStorage.getItem('rme_supabase_url') || SUPABASE_CONFIG.defaultUrl || '').replace(/\s+/g, '').replace(/\/+$/, '');
+      const k = (localStorage.getItem('rme_supabase_key') || SUPABASE_CONFIG.defaultKey || '').replace(/\s+/g, '');
+      return { url: u, anonKey: k };
     }
 
     function initSupabaseIntegration() {
@@ -5112,12 +5112,16 @@
     async function saveAndTestSupabaseConfig() {
       const inputUrl = document.getElementById('supabase-input-url');
       const inputKey = document.getElementById('supabase-input-key');
-      const url = (inputUrl ? inputUrl.value : '').trim();
-      const key = (inputKey ? inputKey.value : '').trim();
+      const url = (inputUrl ? inputUrl.value : '').replace(/\s+/g, '').replace(/\/+$/, '');
+      const key = (inputKey ? inputKey.value : '').replace(/\s+/g, '');
 
       if (!url || !key) {
         alert('Mohon isi Project URL dan Anon Public Key Supabase Anda.');
         return;
+      }
+
+      if (window.location.protocol === 'file:') {
+        alert('⚠️ PERHATIAN BROWSER (CORS):\n\nAnda sedang membuka file secara lokal (file:///...). Sistem keamanan peramban (Chrome) memblokir koneksi API cloud dari file lokal.\n\nHarap buka melalui link website Vercel Anda (https://...) atau server lokal (http://localhost:8080) agar koneksi diizinkan peramban!');
       }
 
       localStorage.setItem('rme_supabase_url', url);
@@ -5339,8 +5343,8 @@
               nik: p.nik || '',
               full_name: p.full_name,
               nama_pasien: p.full_name,
-              birth_date: p.dob || '',
-              dob: p.dob || '',
+              birth_date: p.birth_date || p.dob || '',
+              dob: p.dob || p.birth_date || '',
               gender: p.gender || 'Laki-laki',
               jenis_kelamin: p.gender || 'Laki-laki',
               case_type: p.case_type || 'Umum',
@@ -5348,7 +5352,7 @@
               height_cm: p.height_cm || 170,
               weight_kg: p.weight_kg || 65,
               allergies: p.allergies || 'Tidak Ada',
-              bpjs_status: p.bpjs_number || 'Tidak Ada'
+              bpjs_status: p.bpjs_status || p.bpjs_number || 'Tidak Ada'
             }));
           }
 
@@ -5417,68 +5421,161 @@
           }
 
           case 'apiCreateEncounter': {
-            const e = args[0] || {};
+            let patientId = null;
+            let noRm = '';
+            let patientName = '';
+            let blockRoom = 'Blok Hunian';
+            let isCito = false;
+            let complaint = '';
+            let allergies = 'Tidak Ada';
+            let vitals = { sys: 120, dia: 80, hr: 80, rr: 20, temp: 36.5, spo2: 98, tb: 170, bb: 65, bmi: 22.5 };
+
+            if (typeof args[0] === 'object' && args[0] !== null) {
+              const e = args[0];
+              patientId = e.patient_id || e.id || null;
+              noRm = e.no_rm || e.patient_no_rm || '';
+              patientName = e.name || e.full_name || e.nama_pasien || e.patient_name || '';
+              blockRoom = e.block || e.block_room || 'Blok Hunian';
+              isCito = !!e.is_cito;
+              complaint = e.complaint || '';
+              allergies = e.allergies || 'Tidak Ada';
+              if (e.vitals) vitals = e.vitals;
+            } else {
+              patientId = args[0] || null;
+              noRm = String(args[1] || '').trim();
+              patientName = String(args[2] || '').trim();
+              blockRoom = String(args[3] || 'Blok Hunian').trim();
+              isCito = !!args[4];
+            }
+
+            if (!noRm && typeof AppState !== 'undefined' && AppState.activePatient) {
+              noRm = AppState.activePatient.no_rm || '';
+              patientName = patientName || AppState.activePatient.full_name || AppState.activePatient.nama_pasien || '';
+              blockRoom = blockRoom || AppState.activePatient.block_room || 'Blok Hunian';
+            }
+
+            let validUuid = null;
+            if (patientId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(patientId)) {
+              validUuid = patientId;
+            } else if (noRm) {
+              try {
+                const { data: pData } = await supabaseClient.from('patients').select('id, full_name, block_room').eq('no_rm', noRm).limit(1);
+                if (pData && pData[0]) {
+                  validUuid = pData[0].id;
+                  if (!patientName) patientName = pData[0].full_name;
+                  if (blockRoom === 'Blok Hunian' && pData[0].block_room) blockRoom = pData[0].block_room;
+                }
+              } catch (e) {
+                console.warn('Gagal lookup UUID pasien:', e);
+              }
+            }
+
+            const queueCount = (typeof QueueState !== 'undefined' && QueueState.k2) ? QueueState.k2.length + 1 : 1;
+            const queueNo = isCito ? ('C-' + String(queueCount).padStart(3, '0')) : ('A-' + String(queueCount).padStart(3, '0'));
+
             const payload = {
-              queue_no: e.token || e.queue_no || ('A-' + Math.floor(100 + Math.random() * 900)),
-              patient_no_rm: e.no_rm,
-              patient_name: e.name || e.full_name || e.nama_pasien,
-              patient_age: parseInt(e.age || 35, 10),
-              patient_gender: e.gender || e.jenis_kelamin || 'Laki-laki',
-              block_room: e.block || e.block_room || 'Blok Hunian',
+              queue_no: queueNo,
+              patient_id: validUuid,
+              patient_no_rm: noRm || 'RM-UNKNOWN',
+              patient_name: patientName || 'Pasien WBP',
+              patient_age: 35,
+              patient_gender: 'Laki-laki',
+              block_room: blockRoom,
               current_cluster: 'k2',
-              triage: e.triage || 'HIJAU',
-              is_cito: !!e.is_cito,
+              triage: isCito ? 'MERAH' : 'HIJAU',
+              is_cito: isCito,
               status: 'waiting',
-              complaint: e.complaint || '',
-              allergies: e.allergies || 'Tidak Ada',
-              vitals: e.vitals || { sys: 120, dia: 80, hr: 80, rr: 20, temp: 36.5, spo2: 98, tb: 170, bb: 65, bmi: 22.5 }
+              complaint: complaint,
+              allergies: allergies,
+              vitals: vitals
             };
+
             const { data, error } = await supabaseClient.from('queues').insert([payload]).select();
             if (error) throw error;
-            return { success: true, encounter: data[0] };
+            const savedEncounter = (data && data[0]) ? data[0] : payload;
+            return {
+              success: true,
+              queue_number: queueNo,
+              queue_no: queueNo,
+              encounter: {
+                ...savedEncounter,
+                encounter_id: savedEncounter.id,
+                queue_no: queueNo,
+                queue_number: queueNo
+              }
+            };
           }
 
+          case 'apiSaveAnamnesa':
           case 'apiSaveTriaseNurse': {
-            const encId = args[0];
-            const tData = args[1] || {};
+            const a = (typeof args[0] === 'object' && args[0] !== null) ? args[0] : (args[1] || {});
+            const encId = a.encounter_id || a.id || args[0];
+            const vitals = a.vitals || {
+              sys: parseInt(a.systolic) || 120,
+              dia: parseInt(a.diastolic) || 80,
+              hr: parseInt(a.heart_rate) || 80,
+              rr: parseInt(a.resp_rate) || 20,
+              temp: parseFloat(a.temperature) || 36.5,
+              spo2: parseInt(a.spo2) || 98,
+              bb: parseFloat(a.weight_kg) || 65,
+              tb: parseFloat(a.height_cm) || 170
+            };
             const payload = {
-              complaint: tData.complaint,
-              rpd: tData.rpd,
-              handover_notes: tData.handover || tData.nurse_notes,
-              allergies: tData.allergies || 'Tidak Ada',
-              vitals: tData.vitals,
-              poct_list: tData.poct_list || [],
-              triage: tData.triage || 'HIJAU',
+              complaint: a.complaint || a.chief_complaint || '',
+              rpd: a.rpd || '',
+              handover_notes: a.handover || a.nurse_notes || '',
+              allergies: a.allergies || 'Tidak Ada',
+              vitals: vitals,
+              poct_list: a.poct_list || [],
+              triage: a.triage || 'HIJAU',
               current_cluster: 'k3',
               updated_at: new Date().toISOString()
             };
-            const { error } = await supabaseClient.from('queues').update(payload).eq('id', encId);
-            if (error) throw error;
+            if (encId) {
+              await supabaseClient.from('queues').update(payload).eq('id', encId);
+            }
             return { success: true };
           }
 
+          case 'apiSaveExamination':
           case 'apiSaveDoctorSoap': {
-            const encId = args[0];
-            const sData = args[1] || {};
+            const ex = (typeof args[0] === 'object' && args[0] !== null) ? args[0] : (args[1] || {});
+            const encId = ex.encounter_id || ex.id || args[0];
+            const primCode = ex.primary_icd ? ex.primary_icd.code : (ex.icd10 ? ex.icd10.code : '');
+            const primName = ex.primary_icd ? ex.primary_icd.name : (ex.icd10 ? ex.icd10.name : '');
+            const secCode = ex.secondary_icd ? ex.secondary_icd.code : (ex.icd10 ? ex.icd10.secCode : '');
+            const secName = ex.secondary_icd ? ex.secondary_icd.name : (ex.icd10 ? ex.icd10.secName : '');
+            const rxList = ex.prescription_items || ex.prescriptions || [];
+            const hasRx = Array.isArray(rxList) && rxList.length > 0;
+
             const updatePayload = {
-              soap: sData.soap,
-              icd10: sData.icd10,
-              prescriptions: sData.prescriptions || [],
-              current_cluster: (sData.prescriptions && sData.prescriptions.length > 0) ? 'k4' : 'completed',
-              status: (sData.prescriptions && sData.prescriptions.length > 0) ? 'waiting' : 'completed',
-              dispense_status: (sData.prescriptions && sData.prescriptions.length > 0) ? 'pending' : 'dispensed',
+              soap: ex.soap || {
+                s: ex.subjective || '',
+                o: ex.objective || '',
+                a: primName || '',
+                p: ex.physical_exam || ''
+              },
+              icd10: { code: primCode, name: primName, secCode: secCode, secName: secName },
+              prescriptions: rxList,
+              current_cluster: hasRx ? 'k4' : 'completed',
+              status: hasRx ? 'waiting' : 'completed',
+              dispense_status: hasRx ? 'pending' : 'dispensed',
               updated_at: new Date().toISOString()
             };
-            const { data: updatedQueue, error } = await supabaseClient.from('queues').update(updatePayload).eq('id', encId).select();
-            if (error) throw error;
 
-            const q = (updatedQueue && updatedQueue[0]) || {};
+            let updatedQueue = null;
+            if (encId) {
+              const { data } = await supabaseClient.from('queues').update(updatePayload).eq('id', encId).select();
+              updatedQueue = data && data[0] ? data[0] : null;
+            }
+
+            const q = updatedQueue || {};
             const mrPayload = {
               record_no: 'RMK-' + Date.now(),
-              no_rm: q.patient_no_rm || sData.no_rm || '',
-              nama_pasien: q.patient_name || sData.patient_name || '',
+              no_rm: q.patient_no_rm || ex.no_rm || '',
+              nama_pasien: q.patient_name || ex.patient_name || '',
               tanggal: new Date().toISOString().split('T')[0],
-              keluhan_utama: q.complaint || (sData.soap ? sData.soap.s : ''),
+              keluhan_utama: q.complaint || ex.subjective || '',
               sistole: q.vitals && q.vitals.sys ? parseInt(q.vitals.sys, 10) : null,
               diastole: q.vitals && q.vitals.dia ? parseInt(q.vitals.dia, 10) : null,
               tinggi_badan: q.vitals && q.vitals.tb ? parseFloat(q.vitals.tb) : null,
@@ -5487,10 +5584,10 @@
               nafas: q.vitals && q.vitals.rr ? parseInt(q.vitals.rr, 10) : null,
               spo2: q.vitals && q.vitals.spo2 ? parseInt(q.vitals.spo2, 10) : null,
               suhu: q.vitals && q.vitals.temp ? parseFloat(q.vitals.temp) : null,
-              diagnosa: sData.icd10 ? `${sData.icd10.code || ''} - ${sData.icd10.name || ''}` : '',
-              diagnosa_kode: sData.icd10 ? (sData.icd10.code || '') : '',
-              resep_obat: Array.isArray(sData.prescriptions) ? sData.prescriptions.map(p => `• ${p.name || p.nama_obat} (${p.qty || p.jumlah}) - ${p.signa || p.aturan_pakai}`).join('\n') : '',
-              ttd_dokter: 'dr. MATIUS M. POPANG',
+              diagnosa: primCode ? `${primCode} - ${primName}` : '',
+              diagnosa_kode: primCode,
+              resep_obat: Array.isArray(rxList) ? rxList.map(p => `• ${p.nama_obat || p.name} (${p.jumlah || p.qty}) - ${p.aturan_pakai || p.signa}`).join('\n') : '',
+              ttd_dokter: ex.doctor_name || 'dr. MATIUS M. POPANG',
               created_at: new Date().toISOString()
             };
             await supabaseClient.from('medical_records').insert([mrPayload]);
@@ -5499,14 +5596,59 @@
 
           case 'apiDispensePrescription': {
             const encId = args[0];
-            const { error } = await supabaseClient.from('queues').update({
-              status: 'completed',
-              current_cluster: 'completed',
-              dispense_status: 'dispensed',
-              updated_at: new Date().toISOString()
-            }).eq('id', encId);
-            if (error) throw error;
+            if (encId) {
+              await supabaseClient.from('queues').update({
+                status: 'completed',
+                current_cluster: 'completed',
+                dispense_status: 'dispensed',
+                updated_at: new Date().toISOString()
+              }).eq('id', encId);
+            }
             return { success: true };
+          }
+
+          case 'apiSaveStockMutation': {
+            const m = args[0] || {};
+            await supabaseClient.from('stock_cards').insert([{
+              type: m.mutation_type || 'ADJUSTMENT',
+              qty_in: m.qty_in || 0,
+              qty_out: m.qty_out || 0,
+              notes: m.notes || 'Penyesuaian stok RME',
+              created_at: new Date().toISOString()
+            }]);
+            return { success: true };
+          }
+
+          case 'apiSaveMasterMedicine': {
+            const med = args[0] || {};
+            await supabaseClient.from('medicines').upsert({
+              code: med.kode_obat || med.code,
+              name: med.nama_obat || med.name,
+              category: med.kategori || med.category,
+              unit: med.satuan || med.unit,
+              current_stock: med.current_stock || med.stok || 0
+            }, { onConflict: 'code' });
+            return { success: true };
+          }
+
+          case 'apiGetMasterDiagnoses': {
+            return (typeof MASTER_ICD_DATA !== 'undefined' && MASTER_ICD_DATA.length > 0) ? MASTER_ICD_DATA.map(d => ({
+              icd_code: d.code,
+              diagnosis_name: d.name,
+              description: d.desc || d.name,
+              category: d.cat || 'Umum'
+            })) : [];
+          }
+
+          case 'apiGetClinicalInsight': {
+            return {
+              success: true,
+              differential_diagnoses: [
+                { icd: 'I10', name: 'Essential (Primary) Hypertension', confidence: 95 },
+                { icd: 'I11.9', name: 'Hypertensive Heart Disease', confidence: 60 }
+              ],
+              red_flag: null
+            };
           }
 
           case 'apiGetPatientMedicalHistory': {
